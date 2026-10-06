@@ -99,11 +99,12 @@ input:checked+.slider:before{transform:translateX(16px)}
 
       <div class="card">
         <h3>2. ソース</h3>
-        <label>単語と意味（1行に「単語,意味」の形式で入力、テキストファイル・画像・動画も読み込み可）</label>
+        <label>単語と意味（1行に「単語,意味」の形式で入力、テキストファイルも読み込み可）</label>
         <textarea id="sourceText" placeholder="apple,りんご&#10;run,走る"></textarea>
-        <input type="file" id="sourceFile" accept=".txt,.csv,image/*,video/*" style="margin-top:8px">
-        <div id="mediaPreview"></div>
-        <button class="btn secondary" id="extractMediaBtn" style="display:none;margin-top:8px">画像・動画から単語を抽出する</button>
+        <label style="margin-top:14px">画像・動画から自動で単語を読み取る（複数選択可）</label>
+        <input type="file" id="sourceFile" accept=".txt,.csv,image/*,video/*" multiple style="margin-top:4px">
+        <p class="small">選択すると、どこに単語と意味が写っているかをAIが自動で判断して読み取ります（Anthropic APIキーが必要です）。読み取った内容は上のテキスト欄には表示されず、テスト作成時に自動で合算されます。</p>
+        <div id="extractedList"></div>
         <p class="small" id="fileNote"></p>
 
         <div class="aibox">
@@ -135,6 +136,12 @@ input:checked+.slider:before{transform:translateX(16px)}
             <input type="number" id="cCount" value="4" min="2" max="6">
           </div>
         </div>
+        <label>出題方向</label>
+        <select id="direction">
+          <option value="term2meaning">単語 → 意味</option>
+          <option value="meaning2term">意味 → 単語</option>
+          <option value="both">両方（問題ごとにランダム）</option>
+        </select>
         <div class="toggle"><span>シャッフルする</span><label class="switch"><input type="checkbox" id="optShuffle" checked><span class="slider"></span></label></div>
         <div class="toggle"><span>タイマーを表示する</span><label class="switch"><input type="checkbox" id="optTimer"><span class="slider"></span></label></div>
         <div class="toggle"><span>間違えた問題をあとで復習に出す</span><label class="switch"><input type="checkbox" id="optRetry" checked><span class="slider"></span></label></div>
@@ -189,6 +196,10 @@ input:checked+.slider:before{transform:translateX(16px)}
       <div class="progressbar"><div id="quizProgressBar" style="width:0%"></div></div>
       <p class="small" id="quizProgressText"></p>
       <div class="card" id="quizCard"></div>
+      <div class="row" style="justify-content:space-between">
+        <button class="btn secondary" id="quizPrevBtn">← 前へ</button>
+        <button class="btn" id="quizNextBtn" disabled>次へ →</button>
+      </div>
     </div>
 
   </div>
@@ -210,7 +221,7 @@ const SHOP_ITEMS=[
 ];
 let state={tests:JSON.parse(localStorage.getItem(LS_TESTS)||'[]'),
   keys:JSON.parse(localStorage.getItem(LS_KEYS)||'null')||{c1:'1',c2:'2',c3:'3',c4:'4',c5:'5',c6:'6',next:'Enter'}};
-let selectedTpl='flash', currentQuiz=null, mediaBase64=null, mediaMime=null;
+let selectedTpl='flash', currentQuiz=null;
 const LS_FBCONFIG='vocabApp_firebaseConfig';
 let fbAuth=null, fbDb=null, currentUser=null, cloudLoaded=false;
 
@@ -324,51 +335,73 @@ function extractJsonArray(text){
   try{return JSON.parse(m[0]);}catch(e){return null;}
 }
 
-// ---- source file handling (text / image / video) ----
-$('#sourceFile').addEventListener('change',e=>{
-  const f=e.target.files[0]; if(!f)return;
-  mediaBase64=null; mediaMime=null; $('#extractMediaBtn').style.display='none'; $('#mediaPreview').innerHTML=''; $('#fileNote').textContent='';
-  if(f.type.startsWith('image/')){
-    const r=new FileReader();
-    r.onload=()=>{
-      mediaBase64=r.result.split(',')[1]; mediaMime=f.type;
-      $('#mediaPreview').innerHTML=`<img src="${r.result}" style="max-width:220px;border-radius:8px;margin-top:8px">`;
-      $('#extractMediaBtn').style.display='inline-block';
-    };
-    r.readAsDataURL(f);
-  } else if(f.type.startsWith('video/')){
-    const url=URL.createObjectURL(f);
+// ---- source file handling (text / image / video, multiple files) ----
+let extractedSources=[]; // [{name, status:'loading'|'done'|'error', words:[{term,meaning}], message}]
+
+function renderExtractedList(){
+  if(!extractedSources.length){ $('#extractedList').innerHTML=''; return; }
+  $('#extractedList').innerHTML=extractedSources.map((s,i)=>{
+    const statusText = s.status==='loading' ? '解析中…' : s.status==='error' ? ('エラー: '+s.message) : `${s.words.length}語を自動抽出`;
+    return `<div class="row" style="justify-content:space-between;border:1px solid var(--line);border-radius:7px;padding:8px 10px;margin-top:6px">
+      <span class="small">${s.name} — ${statusText}</span>
+      <button class="btn secondary" data-removeExtract="${i}" style="padding:3px 10px;font-size:12px">✕</button>
+    </div>`;
+  }).join('');
+  $$('[data-removeExtract]').forEach(b=>b.onclick=()=>{extractedSources.splice(+b.dataset.removeextract,1);renderExtractedList();});
+}
+
+function readFileAsDataURL(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(file); }); }
+function readFileAsText(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsText(file); }); }
+function extractVideoFrame(file){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(file);
     const video=document.createElement('video'); video.src=url; video.muted=true; video.playsInline=true;
     video.addEventListener('loadeddata',()=>{ video.currentTime=Math.min(1,(video.duration||2)/2); });
     video.addEventListener('seeked',()=>{
       const canvas=document.createElement('canvas'); canvas.width=video.videoWidth; canvas.height=video.videoHeight;
       canvas.getContext('2d').drawImage(video,0,0);
-      const dataUrl=canvas.toDataURL('image/jpeg',0.85);
-      mediaBase64=dataUrl.split(',')[1]; mediaMime='image/jpeg';
-      $('#mediaPreview').innerHTML=`<img src="${dataUrl}" style="max-width:220px;border-radius:8px;margin-top:8px"><p class="small">動画から1フレームを抽出しました（複数フレームの解析には対応していません）</p>`;
-      $('#extractMediaBtn').style.display='inline-block';
+      resolve(canvas.toDataURL('image/jpeg',0.85));
     });
-  } else {
-    const r=new FileReader();
-    r.onload=()=>{$('#sourceText').value=r.result;$('#fileNote').textContent=f.name+' を読み込みました。'};
-    r.readAsText(f);
-  }
-});
+    video.addEventListener('error',reject);
+  });
+}
 
-$('#extractMediaBtn').onclick=async()=>{
-  const status=$('#aiStatus'); status.textContent='画像を解析中…';
-  try{
-    const req=$('#aiRequest').value.trim();
-    const prompt=`画像から、単語暗記アプリ用の「単語」と「意味」のペアを抽出してください。要望: ${req||'(特になし。画像内の文字や内容から自然に単語と意味を抽出してください)'}\n\n出力はJSON配列のみとし、他の文章は含めないでください。形式: [{"term":"単語","meaning":"意味"}, ...]`;
-    const out=await callClaude([{role:'user',content:[
-      {type:'image',source:{type:'base64',media_type:mediaMime,data:mediaBase64}},
-      {type:'text',text:prompt}
-    ]}]);
-    const arr=extractJsonArray(out);
-    if(arr && arr.length){ $('#sourceText').value=arr.map(r=>`${r.term},${r.meaning}`).join('\n'); status.textContent=`${arr.length}件の単語を抽出しました。`; }
-    else status.textContent='抽出結果を読み取れませんでした。もう一度お試しください。';
-  }catch(err){ status.textContent='エラー: '+(err.message||'不明なエラー'); }
-};
+async function autoExtractFromImage(dataUrl,mime){
+  const prompt=`この画像の中から、単語学習アプリ用の「単語」と「その意味・訳」のペアに該当しそうな部分を自動的に探して読み取ってください。画像内に単語帳・ノート・教材・看板・ラベルなど複数の要素が写っていても、学習に関係のありそうな文字情報だけを自分で判断して対象にし、無関係な背景や装飾は無視してください。読み取れた内容から単語と意味のペアを作成してください。\n\n出力はJSON配列のみとし、説明文などは一切含めないでください。形式: [{"term":"単語","meaning":"意味"}, ...]`;
+  const out=await callClaude([{role:'user',content:[
+    {type:'image',source:{type:'base64',media_type:mime,data:dataUrl.split(',')[1]}},
+    {type:'text',text:prompt}
+  ]}]);
+  const arr=extractJsonArray(out);
+  if(!arr) throw {message:'抽出結果を読み取れませんでした。'};
+  return arr.map(r=>({term:String(r.term||'').trim(),meaning:String(r.meaning||'').trim()})).filter(w=>w.term);
+}
+
+$('#sourceFile').addEventListener('change',async e=>{
+  const files=[...e.target.files]; if(!files.length)return;
+  $('#fileNote').textContent='';
+  for(const f of files){
+    if(f.type.startsWith('image/') || f.type.startsWith('video/')){
+      const entry={name:f.name,status:'loading',words:[],message:''};
+      extractedSources.push(entry); renderExtractedList();
+      try{
+        const dataUrl = f.type.startsWith('image/') ? await readFileAsDataURL(f) : await extractVideoFrame(f);
+        const mime = f.type.startsWith('image/') ? f.type : 'image/jpeg';
+        entry.words = await autoExtractFromImage(dataUrl,mime);
+        entry.status='done';
+      }catch(err){ entry.status='error'; entry.message=err.message||'不明なエラー（APIキーを設定画面で登録してください）'; }
+      renderExtractedList();
+    } else {
+      try{
+        const text=await readFileAsText(f);
+        const cur=$('#sourceText').value;
+        $('#sourceText').value = cur ? (cur+'\n'+text) : text;
+        $('#fileNote').textContent=f.name+' を読み込みました。';
+      }catch(err){ $('#fileNote').textContent=f.name+' の読み込みに失敗しました。'; }
+    }
+  }
+  $('#sourceFile').value='';
+});
 
 $('#aiRunBtn').onclick=async()=>{
   const status=$('#aiStatus'); status.textContent='考え中…';
@@ -384,17 +417,19 @@ $('#aiRunBtn').onclick=async()=>{
 };
 
 $('#createTestBtn').onclick=()=>{
-  const words=parseSource($('#sourceText').value);
+  const manualWords=parseSource($('#sourceText').value);
+  const extractedWords=extractedSources.filter(s=>s.status==='done').flatMap(s=>s.words);
+  const words=[...manualWords,...extractedWords];
   const name=$('#testName').value.trim()||'名称未設定テスト';
-  if(!words.length){alert('単語データがありません。ソースを入力してください。');return;}
+  if(!words.length){alert('単語データがありません。ソースを入力するか、画像・動画を選択してください。');return;}
   const test={id:uid(),name,template:selectedTpl,words,
     settings:{difficulty:$('#difficulty').value,qCount:Math.max(1,+$('#qCount').value||10),
       cCount:Math.max(2,+$('#cCount').value||4),shuffle:$('#optShuffle').checked,
-      timer:$('#optTimer').checked,retry:$('#optRetry').checked},
-    progress:{index:0,correct:0,incorrect:0,completed:false,order:null}};
+      timer:$('#optTimer').checked,retry:$('#optRetry').checked,direction:$('#direction').value},
+    progress:{order:null,directions:null,questions:null,answers:null,pos:0,completed:false}};
   state.tests.unshift(test); save();
   $('#testName').value='';$('#sourceText').value='';$('#aiRequest').value='';$('#aiStatus').textContent='';
-  $('#mediaPreview').innerHTML='';$('#extractMediaBtn').style.display='none';$('#sourceFile').value='';
+  extractedSources=[]; renderExtractedList(); $('#sourceFile').value='';
   render(); showView('list');
 };
 function parseSource(text){
@@ -402,13 +437,20 @@ function parseSource(text){
     .map(p=>({term:p[0].trim(),meaning:p.slice(1).join(',').trim()}));
 }
 
+function correctCount(t){
+  if(!t.progress.answers || !t.progress.questions) return 0;
+  return t.progress.answers.reduce((n,a,i)=> n + (a!=null && a===t.progress.questions[i].answerIndex ? 1:0), 0);
+}
+function totalQCount(t){ return t.progress.order ? t.progress.order.length : 0; }
+
 function renderHome(){
-  const active=state.tests.filter(t=>t.progress.index>0 && !t.progress.completed);
+  const active=state.tests.filter(t=>t.progress.pos>0 && !t.progress.completed);
   if(!active.length){$('#homeList').innerHTML='<div class="empty">進行中のテストはありません。「新規作成」から始めましょう。</div>';return;}
   $('#homeList').innerHTML=active.map(t=>{
-    const pct=Math.round(100*t.progress.index/t.words.length);
+    const total=totalQCount(t);
+    const pct=total ? Math.round(100*t.progress.pos/total) : 0;
     return `<div class="card"><div class="row" style="justify-content:space-between"><h3>${t.name}<span class="chip">${TEMPLATES.find(x=>x.id===t.template)?.name||''}</span></h3><button class="btn" data-resume="${t.id}">再開する</button></div>
-    <div class="progressbar"><div style="width:${pct}%"></div></div><p class="small">${t.progress.index} / ${t.words.length} 問（正解 ${t.progress.correct}）</p></div>`;
+    <div class="progressbar"><div style="width:${pct}%"></div></div><p class="small">${t.progress.pos} / ${total} 問（正解 ${correctCount(t)}）</p></div>`;
   }).join('');
   $$('[data-resume]').forEach(b=>b.onclick=()=>startQuiz(b.dataset.resume));
 }
@@ -418,10 +460,10 @@ function renderList(){
   $('#listArea').innerHTML=state.tests.map(t=>`<div class="card"><div class="row" style="justify-content:space-between">
     <h3>${t.name}<span class="chip">${TEMPLATES.find(x=>x.id===t.template)?.name||''}</span></h3>
     <div class="row"><button class="btn" data-start="${t.id}">開始</button><button class="btn secondary" data-reset="${t.id}">進捗リセット</button><button class="btn danger" data-del="${t.id}">削除</button></div></div>
-    <p class="small">${t.words.length}語・難易度:${({easy:'やさしい',normal:'ふつう',hard:'むずかしい'})[t.settings.difficulty]}・進捗 ${t.progress.index}/${t.words.length}</p></div>`).join('');
+    <p class="small">${t.words.length}語・難易度:${({easy:'やさしい',normal:'ふつう',hard:'むずかしい'})[t.settings.difficulty]}・進捗 ${t.progress.pos}/${totalQCount(t)||t.words.length}</p></div>`).join('');
   $$('[data-start]').forEach(b=>b.onclick=()=>startQuiz(b.dataset.start));
   $$('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('削除しますか？')){state.tests=state.tests.filter(t=>t.id!==b.dataset.del);save();render();}});
-  $$('[data-reset]').forEach(b=>b.onclick=()=>{const t=state.tests.find(t=>t.id===b.dataset.reset);t.progress={index:0,correct:0,incorrect:0,completed:false,order:null};save();render();});
+  $$('[data-reset]').forEach(b=>b.onclick=()=>{const t=state.tests.find(t=>t.id===b.dataset.reset);t.progress={order:null,directions:null,questions:null,answers:null,pos:0,completed:false};save();render();});
 }
 
 function renderShop(){
@@ -430,8 +472,8 @@ function renderShop(){
   $$('[data-shop]').forEach(b=>b.onclick=()=>{
     const s=SHOP_ITEMS[b.dataset.shop];
     state.tests.unshift({id:uid(),name:s.name,template:s.template,words:s.words.map(w=>({term:w[0],meaning:w[1]})),
-      settings:{difficulty:'normal',qCount:s.words.length,cCount:4,shuffle:true,timer:false,retry:true},
-      progress:{index:0,correct:0,incorrect:0,completed:false,order:null}});
+      settings:{difficulty:'normal',qCount:s.words.length,cCount:4,shuffle:true,timer:false,retry:true,direction:'term2meaning'},
+      progress:{order:null,directions:null,questions:null,answers:null,pos:0,completed:false}});
     save(); alert(s.name+' をテスト一覧に追加しました。'); render(); showView('list');
   });
 }
@@ -447,6 +489,19 @@ function renderKeyConfig(){
   });
 }
 
+function buildQuestion(test,wordIdx,dir){
+  const word=test.words[wordIdx];
+  const isTerm2Meaning=dir==='term2meaning';
+  const questionText=isTerm2Meaning?word.term:word.meaning;
+  const correctText=isTerm2Meaning?word.meaning:word.term;
+  const cCount=Math.min(test.settings.cCount,test.words.length);
+  let choices=[correctText];
+  const pool=test.words.filter((_,i)=>i!==wordIdx).map(w=>isTerm2Meaning?w.meaning:w.term);
+  while(choices.length<cCount && pool.length){choices.push(pool.splice(Math.floor(Math.random()*pool.length),1)[0]);}
+  for(let i=choices.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[choices[i],choices[j]]=[choices[j],choices[i]];}
+  return {questionText,choices,answerIndex:choices.indexOf(correctText),isTerm2Meaning};
+}
+
 function startQuiz(id){
   const test=state.tests.find(t=>t.id===id); if(!test)return;
   if(!test.progress.order){
@@ -454,50 +509,70 @@ function startQuiz(id){
     if(test.settings.shuffle){for(let i=order.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[order[i],order[j]]=[order[j],order[i]];}}
     test.progress.order=order.slice(0,Math.min(test.settings.qCount,order.length));
   }
+  if(!test.progress.directions){
+    const dirSetting=test.settings.direction||'term2meaning';
+    test.progress.directions=test.progress.order.map(()=>
+      dirSetting==='both' ? (Math.random()<0.5?'term2meaning':'meaning2term') : dirSetting);
+  }
+  if(!test.progress.questions){
+    test.progress.questions=test.progress.order.map((wordIdx,i)=>buildQuestion(test,wordIdx,test.progress.directions[i]));
+    test.progress.answers=test.progress.order.map(()=>null);
+  }
+  if(test.progress.pos==null) test.progress.pos=0;
   currentQuiz={test}; save(); showView('quiz'); renderQuizQuestion();
 }
 
 function renderQuizQuestion(){
   const {test}=currentQuiz;
-  const {index,order}=test.progress;
+  const {pos,order,questions,answers}=test.progress;
   $('#quizTitle').textContent=test.name;
-  if(index>=order.length){
+  if(pos>=order.length){
     test.progress.completed=true; save();
-    $('#quizCard').innerHTML=`<h3>お疲れさまでした！</h3><p>正解 ${test.progress.correct} / ${order.length}</p>
+    $('#quizCard').innerHTML=`<h3>お疲れさまでした！</h3><p>正解 ${correctCount(test)} / ${order.length}</p>
       <div class="row" style="margin-top:10px"><button class="btn" id="backHomeBtn">ホームへ戻る</button></div>`;
     $('#quizProgressBar').style.width='100%'; $('#quizProgressText').textContent='完了';
+    $('#quizPrevBtn').disabled=false; $('#quizNextBtn').disabled=true;
     $('#backHomeBtn').onclick=()=>{render();showView('home');};
     return;
   }
-  $('#quizProgressBar').style.width=(100*index/order.length)+'%';
-  $('#quizProgressText').textContent=`${index+1} / ${order.length} 問・正解 ${test.progress.correct}`;
-  const wordIdx=order[index]; const word=test.words[wordIdx];
-  const cCount=Math.min(test.settings.cCount,test.words.length);
-  let choices=[word.meaning];
-  const pool=test.words.filter((_,i)=>i!==wordIdx).map(w=>w.meaning);
-  while(choices.length<cCount && pool.length){choices.push(pool.splice(Math.floor(Math.random()*pool.length),1)[0]);}
-  for(let i=choices.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[choices[i],choices[j]]=[choices[j],choices[i]];}
+  $('#quizProgressBar').style.width=(100*pos/order.length)+'%';
+  $('#quizProgressText').textContent=`${pos+1} / ${order.length} 問・正解 ${correctCount(test)}`;
+  const q=questions[pos];
   const keyList=['c1','c2','c3','c4','c5','c6'];
-  $('#quizCard').innerHTML=`<h3 style="font-size:20px">${word.term}</h3><p class="small">意味を選んでください</p>`+
-    choices.map((c,i)=>`<button class="quiz-choice" data-c="${i}"><span class="kbd">${state.keys[keyList[i]]||''}</span>${c}</button>`).join('');
-  const answer=choices.indexOf(word.meaning);
-  let answered=false;
+  $('#quizCard').innerHTML=`<h3 style="font-size:20px">${q.questionText}</h3><p class="small">${q.isTerm2Meaning?'意味':'単語'}を選んでください</p>`+
+    q.choices.map((c,i)=>`<button class="quiz-choice" data-c="${i}"><span class="kbd">${state.keys[keyList[i]]||''}</span>${c}</button>`).join('');
+
+  const picked=answers[pos];
+  $('#quizPrevBtn').disabled = pos===0;
+  $('#quizNextBtn').disabled = picked==null;
+
+  function showResult(){
+    const nodes=$$('.quiz-choice');
+    nodes.forEach((b,i)=>{
+      if(i===q.answerIndex) b.classList.add('correct');
+      if(i===picked && picked!==q.answerIndex) b.classList.add('wrong');
+    });
+  }
+  if(picked!=null) showResult();
+
   function pick(i){
-    if(answered)return; answered=true;
-    $$('.quiz-choice')[i].classList.add(i===answer?'correct':'wrong');
-    if(i===answer)test.progress.correct++; else test.progress.incorrect++;
-    if(i!==answer)$$('.quiz-choice')[answer].classList.add('correct');
-    test.progress.index++; save();
-    setTimeout(renderQuizQuestion,700);
+    if(answers[pos]!=null) return;
+    answers[pos]=i; save();
+    showResult();
+    $('#quizNextBtn').disabled=false;
   }
   $$('.quiz-choice').forEach((b,i)=>b.onclick=()=>pick(i));
+
   currentQuiz.keyHandler && document.removeEventListener('keydown',currentQuiz.keyHandler,true);
   currentQuiz.keyHandler=e=>{
+    if(e.key===state.keys.next){ e.preventDefault(); if(!$('#quizNextBtn').disabled) $('#quizNextBtn').click(); return; }
     const idx=keyList.indexOf(Object.keys(state.keys).find(k=>state.keys[k]===e.key && keyList.includes(k)));
-    if(idx>-1 && idx<choices.length) pick(idx);
+    if(idx>-1 && idx<q.choices.length) pick(idx);
   };
   document.addEventListener('keydown',currentQuiz.keyHandler,true);
 }
+$('#quizPrevBtn').onclick=()=>{ const {test}=currentQuiz; if(test.progress.pos>0){ test.progress.pos--; save(); renderQuizQuestion(); } };
+$('#quizNextBtn').onclick=()=>{ const {test}=currentQuiz; test.progress.pos++; save(); renderQuizQuestion(); };
 $('#quizExitBtn').onclick=()=>{currentQuiz?.keyHandler && document.removeEventListener('keydown',currentQuiz.keyHandler,true);render();showView('home');};
 
 function render(){renderTemplates();renderHome();renderList();renderShop();renderKeyConfig();}
