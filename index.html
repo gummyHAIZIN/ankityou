@@ -60,6 +60,7 @@ label{font-size:12.5px;color:var(--sub);display:block;margin:12px 0 4px;font-wei
 input[type=text],input[type=number],input[type=password],textarea,select{width:100%;padding:9px 11px;border:1px solid var(--line);
   border-radius:7px;font-size:14px;font-family:inherit;background:#fff}
 textarea{min-height:110px;resize:vertical}
+#sourceText{min-height:220px}
 .tplgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin:10px 0 4px}
 .tpl{border:1px solid var(--line);border-radius:8px;padding:14px;text-align:left;background:#fff;font-size:13px}
 .tpl.selected{border-color:var(--accent);background:var(--accent-soft)}
@@ -276,7 +277,7 @@ const SHOP_ITEMS=[
   {name:'常用漢字 読み方',template:'typing',words:[['憂鬱','ゆううつ'],['曖昧','あいまい'],['流暢','りゅうちょう']]},
 ];
 let state={tests:JSON.parse(localStorage.getItem(LS_TESTS)||'[]'),
-  keys:JSON.parse(localStorage.getItem(LS_KEYS)||'null')||{c1:'1',c2:'2',c3:'3',c4:'4',c5:'5',c6:'6',next:'Enter'}};
+  keys:JSON.parse(localStorage.getItem(LS_KEYS)||'null')||{c1:'1',c2:'2',c3:'3',c4:'4',c5:'5',c6:'6',next:'Enter',prev:'Backspace',retry:'r'}};
 let selectedTpl='choice', currentQuiz=null, cCountTouched=false, qCountTouched=false;
 const LS_FBCONFIG='vocabApp_firebaseConfig';
 let fbAuth=null, fbDb=null, currentUser=null;
@@ -547,13 +548,31 @@ $('#saveFirebaseBtn').onclick=()=>{
 })();
 
 // ---- progress helpers ----
+function isAnswerCorrect(q,a){
+  if(a==null) return null; // unanswered
+  if(q.type==='typing') return !a.timedOut && a.text && a.text.trim().toLowerCase()===q.answerText.trim().toLowerCase();
+  return a===q.answerIndex;
+}
+function effectiveRetryIncluded(entry,i){
+  const override = entry.progress.retryFlags ? entry.progress.retryFlags[i] : null;
+  if(override===true) return true;
+  if(override===false) return false;
+  const ok=isAnswerCorrect(entry.progress.questions[i], entry.progress.answers[i]);
+  return ok===false;
+}
+function retryStatusLabel(entry,i){
+  const override = entry.progress.retryFlags ? entry.progress.retryFlags[i] : null;
+  if(override===true) return '手動で登録しています';
+  if(override===false) return '手動で解除しています';
+  const ok=isAnswerCorrect(entry.progress.questions[i], entry.progress.answers[i]);
+  if(ok===null) return '未回答のため未判定';
+  return ok ? '自動判定：正解のため対象外' : '自動判定：不正解のため登録対象';
+}
 function correctCount(entry){
   const {answers,questions}=entry.progress;
   if(!answers||!questions) return 0;
   let n=0;
-  answers.forEach((a,i)=>{ if(a==null) return; const q=questions[i];
-    if(q.type==='typing'){ if(!a.timedOut && a.text && a.text.trim().toLowerCase()===q.answerText.trim().toLowerCase()) n++; }
-    else { if(a===q.answerIndex) n++; } });
+  answers.forEach((a,i)=>{ if(isAnswerCorrect(questions[i],a)) n++; });
   return n;
 }
 function answeredCount(entry){ return entry.progress.answers ? entry.progress.answers.filter(a=>a!=null).length : 0; }
@@ -630,9 +649,9 @@ function renderRecent(){
 }
 
 function renderKeyConfig(){
-  const labels={c1:'選択肢1',c2:'選択肢2',c3:'選択肢3',c4:'選択肢4',c5:'選択肢5',c6:'選択肢6',next:'次へ進む'};
-  $('#keyConfigArea').innerHTML='<h3>キーコンフィグ</h3><p class="small">クイズ中の選択肢・次へをキーボードで操作できます。ボタンを押してキーを設定してください。</p>'+
-    Object.keys(labels).map(k=>`<div class="keyrow"><span>${labels[k]}</span><button class="keybtn" data-key="${k}">${state.keys[k]}</button></div>`).join('');
+  const labels={c1:'選択肢1',c2:'選択肢2',c3:'選択肢3',c4:'選択肢4',c5:'選択肢5',c6:'選択肢6',next:'次へ進む',prev:'前へ戻る',retry:'もう一度に登録/解除'};
+  $('#keyConfigArea').innerHTML='<h3>キーコンフィグ</h3><p class="small">クイズ中の選択肢・前へ・次へ・もう一度登録をキーボードで操作できます。ボタンを押してキーを設定してください。</p>'+
+    Object.keys(labels).map(k=>`<div class="keyrow"><span>${labels[k]}</span><button class="keybtn" data-key="${k}">${state.keys[k]||'未設定'}</button></div>`).join('');
   $$('#keyConfigArea [data-key]').forEach(b=>b.onclick=()=>{
     b.textContent='キーを押してください'; b.classList.add('listening');
     const handler=e=>{e.preventDefault(); state.keys[b.dataset.key]=e.key; b.textContent=e.key; b.classList.remove('listening'); save(); document.removeEventListener('keydown',handler,true);};
@@ -685,6 +704,7 @@ function startQuiz(id){
     entry.progress.questions=entry.progress.order.map((wordIdx,i)=>buildQuestion(entry,words,wordIdx,entry.progress.directions[i]));
     entry.progress.answers=entry.progress.order.map(()=>null);
   }
+  if(!entry.progress.retryFlags){ entry.progress.retryFlags=entry.progress.order.map(()=>null); }
   if(entry.progress.pos==null) entry.progress.pos=0;
   entry.lastPlayedAt=Date.now();
   currentQuiz={entry,words}; save(); showView('quiz'); renderQuizQuestion();
@@ -692,15 +712,9 @@ function startQuiz(id){
 
 function registerRetry(entry,words){
   if(!entry.settings.retry) return;
-  const {order,questions,answers}=entry.progress;
+  const {order}=entry.progress;
   const wrongWordIdxSet=new Set();
-  order.forEach((wordIdx,i)=>{
-    const q=questions[i], a=answers[i];
-    let ok;
-    if(q.type==='typing') ok = a && !a.timedOut && a.text.trim().toLowerCase()===q.answerText.trim().toLowerCase();
-    else ok = a===q.answerIndex;
-    if(!ok) wrongWordIdxSet.add(wordIdx);
-  });
+  order.forEach((wordIdx,i)=>{ if(effectiveRetryIncluded(entry,i)) wrongWordIdxSet.add(wordIdx); });
   const wrongWords=[...wrongWordIdxSet].map(idx=>words[idx]);
   const rootId=entry.isRetryOf||entry.id;
   const baseName=entry.isRetryOf? entry.name.replace(/（もう一度）$/,'') : entry.name;
@@ -746,11 +760,31 @@ function renderQuizQuestion(){
   else { renderChoiceQuestion(entry,q,pos,picked); }
 }
 
+function retryToggleHTML(entry,pos){
+  const included=effectiveRetryIncluded(entry,pos);
+  return `<div class="row" style="margin-top:12px;align-items:center">
+    <button class="btn ${included?'':'secondary'}" id="retryToggleBtn"><span class="kbd">${state.keys.retry||''}</span>${included?'✓ もう一度に登録済み':'もう一度に登録する'}</button>
+    <span class="small" id="retryStatusText">${retryStatusLabel(entry,pos)}</span>
+  </div>`;
+}
+function refreshRetryUI(entry,pos){
+  $('#retryToggleBtn').outerHTML=retryToggleHTML(entry,pos).match(/<button[\s\S]*?<\/button>/)[0];
+  $('#retryStatusText').textContent=retryStatusLabel(entry,pos);
+  wireRetryToggle(entry,pos);
+}
+function wireRetryToggle(entry,pos){
+  $('#retryToggleBtn').onclick=()=>{
+    const cur=effectiveRetryIncluded(entry,pos);
+    entry.progress.retryFlags[pos]=!cur; save();
+    refreshRetryUI(entry,pos);
+  };
+}
+
 function renderChoiceQuestion(entry,q,pos,picked){
   const keyList=['c1','c2','c3','c4','c5','c6'];
   $('#quizCard').innerHTML=`<h3 style="font-size:20px">${q.questionText}</h3><p class="small">${q.isTerm2Meaning?'意味':'単語'}を選んでください</p>`+
     q.choices.map((c,i)=>`<button class="quiz-choice" data-c="${i}"><span class="kbd">${state.keys[keyList[i]]||''}</span>${c}</button>`).join('')+
-    `<p class="resultLabel" id="resultLabel"></p>`;
+    `<p class="resultLabel" id="resultLabel"></p>`+retryToggleHTML(entry,pos);
   $('#quizNextBtn').disabled = picked==null;
   function showResult(pickedIdx){
     const nodes=$$('.quiz-choice');
@@ -765,9 +799,11 @@ function renderChoiceQuestion(entry,q,pos,picked){
     entry.progress.answers[pos]=i; save();
     showResult(i);
     $('#quizNextBtn').disabled=false;
+    refreshRetryUI(entry,pos);
   }
   $$('.quiz-choice').forEach((b,i)=>b.onclick=()=>pick(i));
-  bindQuizKeys(q,pick,keyList);
+  wireRetryToggle(entry,pos);
+  bindQuizKeys(entry,pos,q,pick,keyList);
 }
 
 function renderTypingQuestion(entry,q,pos,picked){
@@ -775,9 +811,10 @@ function renderTypingQuestion(entry,q,pos,picked){
     <div class="row" style="justify-content:space-between;margin-bottom:8px"><span class="timerbox" id="timerBox">--</span></div>
     <input type="text" id="typingInput" placeholder="英単語" ${picked?'disabled':''} autocomplete="off">
     <div class="row" style="margin-top:10px"><button class="btn" id="submitTypingBtn" ${picked?'disabled':''}>回答する</button></div>
-    <p class="resultLabel" id="resultLabel"></p>`;
+    <p class="resultLabel" id="resultLabel"></p>`+retryToggleHTML(entry,pos);
   const limit=entry.settings.timeLimit||15;
   $('#quizNextBtn').disabled = picked==null;
+  wireRetryToggle(entry,pos);
 
   function showResult(ans){
     const ok = !ans.timedOut && ans.text.trim().toLowerCase()===q.answerText.trim().toLowerCase();
@@ -786,6 +823,14 @@ function renderTypingQuestion(entry,q,pos,picked){
     $('#resultLabel').className='resultLabel '+(ok?'ok':'ng');
     $('#submitTypingBtn').disabled=true;
   }
+  currentQuiz.keyHandler && document.removeEventListener('keydown',currentQuiz.keyHandler,true);
+  currentQuiz.keyHandler=e=>{
+    if(e.key===state.keys.next && !$('#quizNextBtn').disabled){ e.preventDefault(); $('#quizNextBtn').click(); return; }
+    if(e.key===state.keys.prev && !$('#quizPrevBtn').disabled){ e.preventDefault(); $('#quizPrevBtn').click(); return; }
+    if(e.key===state.keys.retry){ e.preventDefault(); $('#retryToggleBtn')?.click(); }
+  };
+  document.addEventListener('keydown',currentQuiz.keyHandler,true);
+
   if(picked!=null){ $('#timerBox').textContent='終了'; showResult(picked); return; }
 
   let remaining=limit;
@@ -795,6 +840,7 @@ function renderTypingQuestion(entry,q,pos,picked){
     entry.progress.answers[pos]=ans; save();
     clearInterval(currentQuiz.timerHandle); currentQuiz.timerHandle=null;
     showResult(ans); $('#quizNextBtn').disabled=false;
+    refreshRetryUI(entry,pos);
   }
   currentQuiz.timerHandle=setInterval(()=>{
     remaining--; $('#timerBox').textContent=Math.max(remaining,0)+'秒';
@@ -804,15 +850,14 @@ function renderTypingQuestion(entry,q,pos,picked){
   $('#submitTypingBtn').onclick=submit;
   $('#typingInput').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); submit(); } });
   setTimeout(()=>$('#typingInput').focus(),30);
-  currentQuiz.keyHandler && document.removeEventListener('keydown',currentQuiz.keyHandler,true);
-  currentQuiz.keyHandler=e=>{ if(e.key===state.keys.next && !$('#quizNextBtn').disabled){ e.preventDefault(); $('#quizNextBtn').click(); } };
-  document.addEventListener('keydown',currentQuiz.keyHandler,true);
 }
 
-function bindQuizKeys(q,pick,keyList){
+function bindQuizKeys(entry,pos,q,pick,keyList){
   currentQuiz.keyHandler && document.removeEventListener('keydown',currentQuiz.keyHandler,true);
   currentQuiz.keyHandler=e=>{
     if(e.key===state.keys.next){ e.preventDefault(); if(!$('#quizNextBtn').disabled) $('#quizNextBtn').click(); return; }
+    if(e.key===state.keys.prev){ e.preventDefault(); if(!$('#quizPrevBtn').disabled) $('#quizPrevBtn').click(); return; }
+    if(e.key===state.keys.retry){ e.preventDefault(); $('#retryToggleBtn')?.click(); return; }
     const idx=keyList.indexOf(Object.keys(state.keys).find(k=>state.keys[k]===e.key && keyList.includes(k)));
     if(idx>-1 && idx<q.choices.length) pick(idx);
   };
