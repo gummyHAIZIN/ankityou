@@ -49,7 +49,7 @@ h1{font-size:21px;margin:0 0 4px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-bottom:16px}
 .card h3{margin:0 0 6px;font-size:15px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.btn{background:var(--accent);color:#fff;border:none;padding:9px 18px;border-radius:7px;font-size:13.5px;font-weight:600}
+.btn{background:var(--accent);color:#fff;border:none;padding:9px 18px;border-radius:7px;font-size:13.5px;font-weight:600;display:inline-flex;align-items:center}
 .btn:hover{filter:brightness(1.05)}
 .btn:disabled{opacity:.45}
 .btn.secondary{background:#fff;border:1.5px solid var(--line);color:var(--ink);box-shadow:none}
@@ -82,6 +82,7 @@ input:checked+.slider:before{transform:translateX(16px)}
 .quiz-choice.correct{border-color:var(--ok);background:var(--ok-soft)}
 .quiz-choice.wrong{border-color:var(--danger);background:var(--danger-soft)}
 .kbd{font-size:11px;color:var(--sub);border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-right:8px}
+.checkbox-ui{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border:1.5px solid currentColor;border-radius:4px;margin-right:7px;font-size:11px;line-height:1;flex-shrink:0}
 .keyrow{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
 .keybtn{border:1px solid var(--line);background:#fff;padding:6px 14px;border-radius:6px;font-size:13px;min-width:70px}
 .keybtn.listening{border-color:var(--accent);color:var(--accent)}
@@ -122,7 +123,8 @@ input:checked+.slider:before{transform:translateX(16px)}
       <div class="topbar-menu" id="topbarMenu">
         <label>テスト名を変更</label>
         <input type="text" id="renameInput">
-        <div class="row"><button class="btn" id="renameBtn" style="padding:6px 14px;font-size:12.5px">変更する</button>
+        <div class="row"><button class="btn" id="renameBtn" style="padding:6px 14px;font-size:12.5px">変更する</button></div>
+        <div class="row" style="margin-top:10px"><button class="btn secondary" id="restartCurrentBtn" style="padding:6px 14px;font-size:12.5px">最初からやり直す</button>
         <button class="btn danger" id="deleteCurrentBtn" style="padding:6px 14px;font-size:12.5px">このテストを削除</button></div>
       </div>
       <div style="flex:1"></div>
@@ -255,8 +257,8 @@ input:checked+.slider:before{transform:translateX(16px)}
       <p class="small" id="quizProgressText"></p>
       <div class="card" id="quizCard"></div>
       <div class="row" style="justify-content:space-between">
-        <button class="btn secondary" id="quizPrevBtn">← 前へ</button>
-        <button class="btn" id="quizNextBtn" disabled>次へ →</button>
+        <button class="btn secondary" id="quizPrevBtn"><span class="kbd" id="prevKeyLabel"></span>← 前へ</button>
+        <button class="btn" id="quizNextBtn" disabled>次へ →<span class="kbd" id="nextKeyLabel"></span></button>
       </div>
     </div>
 
@@ -331,6 +333,18 @@ $('#deleteCurrentBtn').onclick=()=>{
   if(!confirm('このテストを削除しますか？'))return;
   state.tests=state.tests.filter(t=>t.id!==currentQuiz.entry.id); save();
   currentQuiz=null; render(); showView('home');
+};
+function restartProgress(entry){
+  entry.progress={order:null,directions:null,questions:null,answers:null,pos:0,completed:false,retryFlags:null};
+  save();
+}
+$('#restartCurrentBtn').onclick=()=>{
+  if(!currentQuiz)return;
+  if(!confirm('最初からやり直しますか？これまでの進捗は失われます。'))return;
+  const id=currentQuiz.entry.id;
+  restartProgress(currentQuiz.entry);
+  $('#topbarMenu').classList.remove('open'); $('#topbarChev').classList.remove('open');
+  startQuiz(id);
 };
 
 function renderTemplates(){
@@ -560,14 +574,6 @@ function effectiveRetryIncluded(entry,i){
   const ok=isAnswerCorrect(entry.progress.questions[i], entry.progress.answers[i]);
   return ok===false;
 }
-function retryStatusLabel(entry,i){
-  const override = entry.progress.retryFlags ? entry.progress.retryFlags[i] : null;
-  if(override===true) return '手動で登録しています';
-  if(override===false) return '手動で解除しています';
-  const ok=isAnswerCorrect(entry.progress.questions[i], entry.progress.answers[i]);
-  if(ok===null) return '未回答のため未判定';
-  return ok ? '自動判定：正解のため対象外' : '自動判定：不正解のため登録対象';
-}
 function correctCount(entry){
   const {answers,questions}=entry.progress;
   if(!answers||!questions) return 0;
@@ -585,10 +591,16 @@ function renderHome(){
   if(!active.length){$('#homeList').innerHTML='<div class="empty">進行中のテストはありません。「新規作成」から始めましょう。</div>';return;}
   $('#homeList').innerHTML=active.map(t=>{
     const total=totalQCount(t); const pct=total?Math.round(100*t.progress.pos/total):0;
-    return `<div class="card"><div class="row" style="justify-content:space-between"><h3>${t.name}<span class="chip">${TEMPLATES.find(x=>x.id===t.template)?.name||''}</span></h3><button class="btn" data-resume="${t.id}">再開する</button></div>
+    return `<div class="card"><div class="row" style="justify-content:space-between"><h3>${t.name}<span class="chip">${TEMPLATES.find(x=>x.id===t.template)?.name||''}</span></h3>
+    <div class="row"><button class="btn" data-resume="${t.id}">再開する</button><button class="btn secondary" data-restart="${t.id}">最初から</button></div></div>
     <div class="progressbar"><div style="width:${pct}%"></div></div><p class="small">${t.progress.pos} / ${total} 問・正解 ${correctCount(t)}（正解率 ${accuracyPercent(t)}%）</p></div>`;
   }).join('');
   $$('[data-resume]').forEach(b=>b.onclick=()=>startQuiz(b.dataset.resume));
+  $$('[data-restart]').forEach(b=>b.onclick=()=>{
+    if(!confirm('最初からやり直しますか？これまでの進捗は失われます。'))return;
+    const t=state.tests.find(t=>t.id===b.dataset.restart);
+    restartProgress(t); startQuiz(t.id);
+  });
 }
 
 function renderList(){
@@ -605,7 +617,7 @@ function renderList(){
   }).join('');
   $$('[data-start]').forEach(b=>b.onclick=()=>startQuiz(b.dataset.start));
   $$('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('削除しますか？')){state.tests=state.tests.filter(t=>t.id!==b.dataset.del);save();render();}});
-  $$('[data-reset]').forEach(b=>b.onclick=()=>{const t=state.tests.find(t=>t.id===b.dataset.reset);t.progress={order:null,directions:null,questions:null,answers:null,pos:0,completed:false};save();render();});
+  $$('[data-reset]').forEach(b=>b.onclick=()=>{const t=state.tests.find(t=>t.id===b.dataset.reset); restartProgress(t); render();});
   renderBundleForm();
 }
 
@@ -654,7 +666,7 @@ function renderKeyConfig(){
     Object.keys(labels).map(k=>`<div class="keyrow"><span>${labels[k]}</span><button class="keybtn" data-key="${k}">${state.keys[k]||'未設定'}</button></div>`).join('');
   $$('#keyConfigArea [data-key]').forEach(b=>b.onclick=()=>{
     b.textContent='キーを押してください'; b.classList.add('listening');
-    const handler=e=>{e.preventDefault(); state.keys[b.dataset.key]=e.key; b.textContent=e.key; b.classList.remove('listening'); save(); document.removeEventListener('keydown',handler,true);};
+    const handler=e=>{e.preventDefault(); state.keys[b.dataset.key]=e.key; b.textContent=e.key; b.classList.remove('listening'); save(); updateNavKeyLabels(); document.removeEventListener('keydown',handler,true);};
     document.addEventListener('keydown',handler,true);
   });
 }
@@ -732,10 +744,16 @@ function registerRetry(entry,words){
   save();
 }
 
+function updateNavKeyLabels(){
+  $('#prevKeyLabel').textContent=state.keys.prev||'';
+  $('#nextKeyLabel').textContent=state.keys.next||'';
+}
+
 function renderQuizQuestion(){
   const {entry,words}=currentQuiz;
   const {pos,order,questions,answers}=entry.progress;
   $('#topbarTitle').textContent=entry.name;
+  updateNavKeyLabels();
   if(currentQuiz.timerHandle){clearInterval(currentQuiz.timerHandle);currentQuiz.timerHandle=null;}
 
   if(pos>=order.length){
@@ -763,13 +781,11 @@ function renderQuizQuestion(){
 function retryToggleHTML(entry,pos){
   const included=effectiveRetryIncluded(entry,pos);
   return `<div class="row" style="margin-top:12px;align-items:center">
-    <button class="btn ${included?'':'secondary'}" id="retryToggleBtn"><span class="kbd">${state.keys.retry||''}</span>${included?'✓ もう一度に登録済み':'もう一度に登録する'}</button>
-    <span class="small" id="retryStatusText">${retryStatusLabel(entry,pos)}</span>
+    <button class="btn ${included?'':'secondary'}" id="retryToggleBtn"><span class="checkbox-ui">${included?'✓':''}</span><span class="kbd">${state.keys.retry||''}</span>${included?'もう一度に登録済み':'もう一度に登録する'}</button>
   </div>`;
 }
 function refreshRetryUI(entry,pos){
   $('#retryToggleBtn').outerHTML=retryToggleHTML(entry,pos).match(/<button[\s\S]*?<\/button>/)[0];
-  $('#retryStatusText').textContent=retryStatusLabel(entry,pos);
   wireRetryToggle(entry,pos);
 }
 function wireRetryToggle(entry,pos){
@@ -825,6 +841,7 @@ function renderTypingQuestion(entry,q,pos,picked){
   }
   currentQuiz.keyHandler && document.removeEventListener('keydown',currentQuiz.keyHandler,true);
   currentQuiz.keyHandler=e=>{
+    if(e.repeat) return; // キーを押しっぱなしにしたときの連続発火を無視
     if(e.key===state.keys.next && !$('#quizNextBtn').disabled){ e.preventDefault(); $('#quizNextBtn').click(); return; }
     if(e.key===state.keys.prev && !$('#quizPrevBtn').disabled){ e.preventDefault(); $('#quizPrevBtn').click(); return; }
     if(e.key===state.keys.retry){ e.preventDefault(); $('#retryToggleBtn')?.click(); }
@@ -855,6 +872,7 @@ function renderTypingQuestion(entry,q,pos,picked){
 function bindQuizKeys(entry,pos,q,pick,keyList){
   currentQuiz.keyHandler && document.removeEventListener('keydown',currentQuiz.keyHandler,true);
   currentQuiz.keyHandler=e=>{
+    if(e.repeat) return; // キーを押しっぱなしにしたときの連続発火を無視
     if(e.key===state.keys.next){ e.preventDefault(); if(!$('#quizNextBtn').disabled) $('#quizNextBtn').click(); return; }
     if(e.key===state.keys.prev){ e.preventDefault(); if(!$('#quizPrevBtn').disabled) $('#quizPrevBtn').click(); return; }
     if(e.key===state.keys.retry){ e.preventDefault(); $('#retryToggleBtn')?.click(); return; }
